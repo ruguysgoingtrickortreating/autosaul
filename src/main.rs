@@ -1,12 +1,19 @@
-use std::collections::HashMap;
-
 use colored::Colorize;
-use lavalink_rs::{client::LavalinkClient, model::events, node::NodeBuilder, prelude::NodeDistributionStrategy};
+use lavalink_rs::{
+    client::LavalinkClient, model::events, node::NodeBuilder, prelude::NodeDistributionStrategy,
+};
 use poise::serenity_prelude::{self as serenity, CacheHttp};
+use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use rusqlite::Connection;
 use songbird::SerenityInit;
 use tokio::sync::Mutex;
+
+mod commands;
+use commands::*;
+
+pub mod image_edit;
 
 include!("../cards_map");
 
@@ -48,15 +55,11 @@ static HORSE_NAMES: [&'static str; 35] = [
     "David",
 ];
 
-mod cmds;
-mod audio;
-mod audio_events;
-mod gambling;
-
+static REQ_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| reqwest::Client::new());
 struct Data {
     rand_words: Vec<&'static str>,
     pub lavalink: LavalinkClient,
-    active_games: Mutex<HashMap<serenity::GuildId,gambling::GamblingGames>>,
+    active_games: Mutex<HashMap<serenity::GuildId, games::Games>>,
 }
 
 // struct HttpKey;
@@ -68,20 +71,25 @@ struct Data {
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::PrefixContext<'a, Data, Error>;
 
-
 #[tokio::main]
 async fn main() {
+    saulimages::init("autosaul");
+
     let response = reqwest::get("https://www.mit.edu/~ecprice/wordlist.10000").await;
     let response_utf;
     let mut rand_words: Vec<&'static str> = vec!["couldn't fetch random word list"];
     match response {
         Ok(val) => {
-            response_utf = val.text().await.expect("Got random word list but could not read as text");
-            rand_words = response_utf.lines()
+            response_utf = val
+                .text()
+                .await
+                .expect("Got random word list but could not read as text");
+            rand_words = response_utf
+                .lines()
                 .map(|line| Box::leak(line.to_string().into_boxed_str()) as &'static str)
                 .collect();
-        },
-        Err(err) => eprintln!("COULD NOT FETCH RANDOM WORD LIST: {}",err)
+        }
+        Err(err) => eprintln!("COULD NOT FETCH RANDOM WORD LIST: {:?}", err),
     };
 
     if let Ok(db) = Connection::open("saul.db") {
@@ -90,24 +98,63 @@ async fn main() {
                 id integer primary key,
                 discord_id integer unique,
                 agarthereum integer not null default 0
-            )",[]
+            )",
+            [],
         ) {
-            eprintln!("COULD NOT CREATE DATABASE TABLE: {}",err)
+            eprintln!("COULD NOT CREATE DATABASE TABLE: {}", err)
         }
     }
 
-    let active_games: Mutex<HashMap<serenity::GuildId,gambling::GamblingGames>> = Mutex::new(HashMap::new());
+    let active_games: Mutex<HashMap<serenity::GuildId, games::Games>> = Mutex::new(HashMap::new());
 
     let token = include_str!("../token.txt");
-    let intents = serenity::GatewayIntents::non_privileged() | serenity::GatewayIntents::MESSAGE_CONTENT | serenity::GatewayIntents::GUILDS;
+    let intents = serenity::GatewayIntents::non_privileged()
+        | serenity::GatewayIntents::MESSAGE_CONTENT
+        | serenity::GatewayIntents::GUILDS;
 
-    let framework = poise::Framework::<Data,Error>::builder()
+    let framework = poise::Framework::<Data, Error>::builder()
         .options(poise::FrameworkOptions {
             commands: vec![
-                cmds::help(),cmds::saul(),cmds::getmessage(),cmds::ban(),cmds::restart(),cmds::tickle(),cmds::streamtest(),cmds::invite(),cmds::cards_named_finger(),
-                audio::play(),audio::stop(),audio::clear(),audio::skip(),audio::queue(),audio::nowplaying(),audio::skipto(),audio::rewind(),audio::fastforward(),audio::pause(),audio::resume(),audio::set(),audio::joe(),
-                gambling::balance(),gambling::give(),gambling::horseracing(),gambling::wager(),gambling::coalmines(),gambling::chinesesweatshop(),
-                ], /////////////////////////////////////////////
+                cmds::help(),
+                cmds::saul(),
+                cmds::getmessage(),
+                cmds::ban(),
+                cmds::restart(),
+                cmds::tickle(),
+                cmds::streamtest(),
+                cmds::invite(),
+                cmds::cards_named_finger(),
+                audio::play(),
+                audio::stop(),
+                audio::clear(),
+                audio::skip(),
+                audio::queue(),
+                audio::nowplaying(),
+                audio::skipto(),
+                audio::rewind(),
+                audio::fastforward(),
+                audio::pause(),
+                audio::resume(),
+                audio::set(),
+                audio::remove(),
+                audio::joe(),
+                gambling::balance(),
+                gambling::give(),
+                gambling::horseracing(),
+                gambling::wager(),
+                gambling::coalmines(),
+                gambling::chinesesweatshop(),
+                games::imposter(),
+                games::join(),
+                games::start(),
+                games::stop_imposter(),
+                images::chain(),
+                images::caption(),
+                images::pugsley(),
+                images::rio_de_janeiro(),
+                images::papyrus(),
+                images::burn(),
+            ], /////////////////////////////////////////////
             prefix_options: poise::PrefixFrameworkOptions {
                 prefix: Some("!".into()),
                 ..Default::default()
@@ -116,18 +163,39 @@ async fn main() {
                 Box::pin(async move {
                     match event {
                         serenity::FullEvent::Message { new_message } => {
-                            let guild_name = if let Some(gid) = new_message.guild_id {gid.to_string()} else {"none".to_string()};
+                            let guild_name = if let Some(gid) = new_message.guild_id {
+                                gid.to_string()
+                            } else {
+                                "none".to_string()
+                            };
 
-                            println!("[{guild_name}] {}: {}",new_message.author.name.bright_green(),new_message.content);
+                            println!(
+                                "[{guild_name}] {}: {}",
+                                new_message.author.name.bright_green(),
+                                new_message.content
+                            );
+                            // for attachment in &new_message.attachments {
+                            //     println!("          - {}",attachment.content_type.as_ref().unwrap());
+                            // }
 
                             if new_message.content == "😉" {
                                 let rand_range = rand::random_range(0..data.rand_words.len());
-                                new_message.channel_id.say(&ctx.http,&*data.rand_words[rand_range]).await?;
+                                new_message
+                                    .channel_id
+                                    .say(&ctx.http, &*data.rand_words[rand_range])
+                                    .await?;
                             }
-                        },
+                        }
                         serenity::FullEvent::VoiceStateUpdate { old, new } => {
-                            let Some(oldstatus) = old else {return Ok(());};
-                            let channel = oldstatus.channel_id.unwrap().to_channel(&ctx.http()).await.unwrap();
+                            let Some(oldstatus) = old else {
+                                return Ok(());
+                            };
+                            let channel = oldstatus
+                                .channel_id
+                                .unwrap()
+                                .to_channel(&ctx.http())
+                                .await
+                                .unwrap();
                             if let serenity::Channel::Guild(channel) = channel {
                                 let members = channel.members(ctx.cache().unwrap())?;
                                 if members.len() == 1 {
@@ -140,12 +208,18 @@ async fn main() {
                                         if manager.get(guild_id).is_some() {
                                             manager.remove(guild_id).await?;
                                         }
-                                        println!("[{}] {}",guild_id.name(ctx.cache.clone()).unwrap_or(guild_id.to_string()),"everyone left, leaving voice channel..".purple());
+                                        println!(
+                                            "[{}] {}",
+                                            guild_id
+                                                .name(ctx.cache.clone())
+                                                .unwrap_or(guild_id.to_string()),
+                                            "everyone left, leaving voice channel..".purple()
+                                        );
                                     }
                                 }
                             }
-                        },
-                        _ => ()
+                        }
+                        _ => (),
                     }
 
                     Ok(())
@@ -153,15 +227,23 @@ async fn main() {
             },
             pre_command: |ctx| {
                 Box::pin(async move {
-                    let guild_name = if let Some(g) = ctx.guild() {g.name.clone()} else {"none".to_string()};
-                    println!("[{}] executing command \"{}\"", guild_name, ctx.command().qualified_name.bright_red());
+                    let guild_name = if let Some(g) = ctx.guild() {
+                        g.name.clone()
+                    } else {
+                        "none".to_string()
+                    };
+                    println!(
+                        "[{}] executing command \"{}\"",
+                        guild_name,
+                        ctx.command().qualified_name.bright_red()
+                    );
                 })
             },
             ..Default::default()
         })
         .setup(|ctx, ready, _framework| {
             Box::pin(async move {
-                let events =  events::Events {
+                let events = events::Events {
                     // raw: Some(audio_events::raw_event),
                     ready: Some(audio_events::ready_event),
                     track_start: Some(audio_events::track_start),
@@ -177,9 +259,10 @@ async fn main() {
                 };
                 let client = LavalinkClient::new(
                     events,
-                    vec![node_local], 
-                    NodeDistributionStrategy::round_robin()
-                ).await;
+                    vec![node_local],
+                    NodeDistributionStrategy::round_robin(),
+                )
+                .await;
 
                 println!("Created bot as {}", ready.user.name.bright_green());
                 // poise::builtins::register_globally(ctx, &framework.options().commands)
@@ -195,11 +278,11 @@ async fn main() {
         .framework(framework)
         .register_songbird()
         // .type_map_insert::<HttpKey>(HttpClient::new())
-        .await {
-            Ok(c) => c,
-            Err(e) => panic!("unable to start bot: {}",e),
+        .await
+    {
+        Ok(c) => c,
+        Err(e) => panic!("unable to start bot: {}", e),
     };
 
     client.start().await.unwrap()
-    
 }

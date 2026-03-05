@@ -1,7 +1,7 @@
 use poise::{CreateReply, serenity_prelude::{Color, CreateActionRow, CreateButton, CreateEmbed, CreateInteractionResponse, CreateInteractionResponseMessage, EditMessage, MessageId, UserId, futures::StreamExt}};
 use std::{collections::BTreeMap, process, time::Duration};
-
-use crate::{Context,Error};
+use itertools::Itertools;
+use crate::{Context, Error};
 
 /// show the help menu
 #[poise::command(prefix_command)]
@@ -173,3 +173,15 @@ pub async fn cards_named_finger(ctx:Context<'_>) -> Result<(), Error> {
     ctx.say(m).await?;
     Ok(())
 }
+
+// #[poise::command(prefix_command)]
+// pub async fn analyze(ctx:Context<'_>) -> Result<(), Error> {
+//     let m = ctx.msg;
+//     ctx.say(format!(r#"attachments: {}
+// embeds: {}
+// nonce: {}
+// "#,
+//         m.attachments.iter().map(|a| format!("({},{})",a.url,a.content_type.unwrap_or_default())).join(", "),
+//         m.embeds.iter().map(|e| e)
+//     ))
+// }

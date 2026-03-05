@@ -11,11 +11,7 @@ use crate::{Context,Error};
 
 
 #[derive(Default)]
-pub struct GamblingGames {
-    horse_racing: Option<HorseRacingData>,
-}
-#[derive(Default)]
-struct HorseRacingData {
+pub struct HorseRacingData {
     betting: Option<Instant>,
     wager_input: Option<mpsc::Sender<(User,usize)>>,
     // wagers: BTreeMap<serenity::UserId, (String, usize)>,
@@ -363,7 +359,7 @@ async fn _horseracing(ctx:&Context<'_>) -> Result<(), Error> {
             gg.horse_racing = Some(HorseRacingData::default());
         }
     } else {
-        games.insert(guild_id, GamblingGames{horse_racing:Some(HorseRacingData::default())});
+        games.insert(guild_id, crate::games::Games{horse_racing:Some(HorseRacingData::default()), ..Default::default()});
     }
 
     drop(games);
