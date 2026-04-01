@@ -1,12 +1,12 @@
 use std::time::Duration;
-
+use itertools::{enumerate, Itertools};
 use lavalink_rs::{model::player as lavaplayer, prelude::*};
 
 use poise::{
     CreateReply,
     serenity_prelude::{self as serenity, Color, CreateEmbed, futures::StreamExt},
 };
-
+use poise::serenity_prelude::{ComponentInteractionCollector, CreateActionRow, CreateButton, CreateInteractionResponse, CreateInteractionResponseMessage, EditMessage};
 use crate::{Context, Error};
 
 async fn _join(
@@ -82,13 +82,8 @@ async fn _join(
 
 /// play a song
 #[poise::command(prefix_command, category = "audio", aliases("p"))]
-pub async fn play(ctx: Context<'_>, #[rest] query: Option<String>) -> Result<(), Error> {
-    let Some(query) = query else {
-        ctx.say("no song provided").await?;
-        return Ok(());
-    };
-
-    let guild_id = ctx.guild_id().unwrap();
+pub async fn play(ctx: Context<'_>, #[rest] query: String) -> Result<(), Error> {
+    let Some(guild_id) = ctx.guild_id() else {ctx.say("can't do voice commands in dms").await?; return Ok(());};
 
     let lavaclient = ctx.data().lavalink.clone();
 
@@ -119,20 +114,17 @@ pub async fn play(ctx: Context<'_>, #[rest] query: Option<String>) -> Result<(),
 
     let loaded_tracks = lavaclient.load_tracks(guild_id, &term).await?;
 
-    // let mut playlist_info = None;
+    let mut playlist_info = None;
 
-    let tracks: Vec<TrackInQueue> = match loaded_tracks.data {
+    let mut tracks: Vec<TrackInQueue> = match loaded_tracks.data {
         Some(TrackLoadData::Track(x)) => vec![x.into()],
         Some(TrackLoadData::Search(x)) => vec![x[0].clone().into()],
-        Some(TrackLoadData::Playlist(_)) => {
-            // playlist_info = Some(x.info);
-            // x.tracks.iter().map(|x| x.clone().into()).collect()
-            ctx.say("playlists aren't supported 😿").await?;
-            return Ok(());
+        Some(TrackLoadData::Playlist(x)) => {
+            playlist_info = Some(x.info);
+            x.tracks.into_iter().map(|x|x.into()).collect()
         }
         None => {
-            ctx.say(format!("no results found with that search 😿"))
-                .await?;
+            ctx.say(format!("no results found with that search 😿")).await?;
             return Ok(());
         }
         _ => {
@@ -142,7 +134,11 @@ pub async fn play(ctx: Context<'_>, #[rest] query: Option<String>) -> Result<(),
     };
 
     let queue = player.get_queue();
-    let track = &tracks[0].track;
+    let track = if let Some(info) = &playlist_info {
+        tracks.remove(info.selected_track.unwrap_or_default() as usize).track
+    } else {
+        tracks.remove(0).track
+    };
 
     let count = queue.get_count().await?;
     let title_string = match &track.info.uri {
@@ -151,16 +147,25 @@ pub async fn play(ctx: Context<'_>, #[rest] query: Option<String>) -> Result<(),
     };
 
     if player.get_player().await?.track.is_some() {
-        ctx.say(format!(
-            "#{} - '{}' added to queue",
-            count + 1,
-            title_string
-        ))
-        .await?;
+        if let Some(info) = playlist_info {
+            ctx.say(format!("🔣 added PLAYLIST '**{}**' to the queue", info.name)).await?;
+        } else {
+            ctx.say(format!(
+                "#{} - '{}' added to queue",
+                count + 1,
+                title_string
+            ))
+                .await?;
+        }
         queue.append(tracks.into())?;
     } else {
-        ctx.say(format!("now playing: '{}'", title_string)).await?;
-        if let Err(err) = player.play(track).await {
+        if let Some(info) = playlist_info {
+            ctx.say(format!("🔣 added PLAYLIST '**{}**' to the queue\nnow playing playlist track: '{title_string}'", info.name)).await?;
+            queue.append(tracks.into())?;
+        } else {
+            ctx.say(format!("now playing: '{}'", title_string)).await?;
+        }
+        if let Err(err) = player.play(&track).await {
             ctx.say(format!("😿 error playing song: {}", err)).await?;
             return Err(err.into());
         }
@@ -173,10 +178,159 @@ pub async fn play(ctx: Context<'_>, #[rest] query: Option<String>) -> Result<(),
     Ok(())
 }
 
+/// search for a song and pick from a list
+#[poise::command(prefix_command, category = "audio")]
+pub async fn search(ctx: Context<'_>, #[rest] query: String) -> Result<(), Error> {
+    let Some(guild_id) = ctx.guild_id() else {ctx.say("can't do voice commands in dms").await?; return Ok(());};
+
+    let lavaclient = ctx.data().lavalink.clone();
+
+    let player = match lavaclient.get_player_context(guild_id) {
+        Some(p) => p,
+        None => {
+            if let Err(_) = _join(&ctx, guild_id, None).await {
+                return Ok(());
+            };
+            lavaclient
+                .get_player_context(guild_id)
+                .expect("couldn't find lava context even after trying to join")
+        }
+    };
+
+    let term = match SearchEngines::YouTube.to_query(&query) {
+        Ok(t) => t,
+        Err(err) => {
+            ctx.say(format!("**ran into an error 😿** ```{}```", err))
+                .await?;
+            return Err(err.into());
+        }
+    };
+
+    let loaded_tracks = lavaclient.load_tracks(guild_id, &term).await?;
+
+    let mut results = match loaded_tracks.data {
+        Some(TrackLoadData::Search(x)) => {
+            x
+        }
+        None => {
+            ctx.say("no results found with that search 😿").await?;
+            return Ok(());
+        }
+        _ => {
+            ctx.say("that query did not result in a search").await?;
+            return Ok(());
+        }
+    };
+    drop(lavaclient);
+
+    let mut index = 0_usize;
+    const SIZE: usize = 5;
+
+    let create_results_message = |index, prev_disabled, next_disabled| -> (Vec<CreateEmbed>, Vec<CreateActionRow>) {
+        let slice = if index + SIZE > results.len() {
+            &results[index..results.len()]
+        } else {
+            &results[index..index+5]
+        };
+        let embeds = slice.iter().enumerate().map(|(i, t)|
+            CreateEmbed::new()
+                .title(format!("{}. {}", i+1+index, t.info.title.clone()))
+                .field(
+                    "",
+                    format!("**author:** {}",t.info.author),
+                    false
+                )
+                .thumbnail(t.info.artwork_url.clone().unwrap_or_default())
+        ).collect_vec();
+        let action_row = CreateActionRow::Buttons(slice.iter().enumerate().map(|(i, _)|
+            CreateButton::new((i+index).to_string()).label((i+1+index).to_string())
+        ).collect_vec());
+        let action_row_2 = CreateActionRow::Buttons(vec![
+            CreateButton::new("prev").disabled(prev_disabled).label("◀"),
+            CreateButton::new("next").disabled(next_disabled).label("▶")
+        ]);
+        (embeds, vec![action_row, action_row_2])
+    };
+
+    let mut msg = ctx.send({
+        let (embeds, action_rows) = create_results_message(index, true, results.len() <= SIZE);
+        CreateReply {
+            content: Some(format!("search results for: {}", query)),
+            embeds,
+            components: Some(action_rows),
+            ..Default::default()
+        }
+    }).await?.into_message().await?;
+    let mut collector = ComponentInteractionCollector::new(ctx)
+        .message_id(msg.id)
+        .timeout(Duration::from_secs(30))
+        .stream();
+
+    let mut choice = None;
+
+    while let Some(interaction) = collector.next().await {
+        if let Ok(i) = interaction.data.custom_id.parse::<usize>() {
+            choice = Some(i);
+            interaction.create_response(ctx, CreateInteractionResponse::Acknowledge).await?;
+            break
+        } else {
+            match interaction.data.custom_id.as_str() {
+                "next" => index += SIZE,
+                "prev" => index -= SIZE,
+                _ => panic!()
+            }
+            let (embeds, action_rows) = create_results_message(index, index == 0, index + SIZE >= results.len());
+            interaction.create_response(ctx, CreateInteractionResponse::UpdateMessage(CreateInteractionResponseMessage::new()
+                .embeds(embeds)
+                .components(action_rows)
+            )).await?;
+        }
+    }
+
+    let Some(choice_index) = choice else {
+        msg.edit(ctx, EditMessage::new().components(vec![]).embeds(vec![]).content("took too long to choose")).await?;
+        return Ok(())
+    };
+
+    let queue = player.get_queue();
+    let track = results.remove(choice_index);
+
+    let count = queue.get_count().await?;
+    let title_string = match &track.info.uri {
+        Some(t) => format!("[**{}**]({})", track.info.title, t),
+        None => format!("**{}**", track.info.title),
+    };
+
+    if player.get_player().await?.track.is_some() {
+        msg.edit(ctx, EditMessage::new().components(vec![]).embeds(vec![]).content(format!(
+            "#{} - '{}' added to queue",
+            count + 1,
+            title_string
+        ))).await?;
+        queue.append(vec![track.into()].into())?;
+    } else {
+        msg.edit(ctx, EditMessage::new().components(vec![]).embeds(vec![]).content(
+            format!("now playing: '{}'", title_string)
+        )).await?;
+        if let Err(err) = player.play(&track).await {
+            ctx.say(format!("😿 error playing song: {}", err)).await?;
+            return Err(err.into());
+        }
+    }
+
+
+    // ctx.say(results.into_iter().enumerate()
+    //     .map(|(i, x)| format!("{}. {}",i+1, x.info.title))
+    //     .join("\n")).await?;
+
+    Ok(())
+
+}
+
 /// stop playing and disconnect saul
 #[poise::command(prefix_command, category = "audio")]
 pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
-    let guild_id = ctx.guild_id().unwrap();
+    let Some(guild_id) = ctx.guild_id() else {ctx.say("can't do voice commands in dms").await?; return Ok(());};
 
     let manager = songbird::get(ctx.serenity_context()).await.unwrap().clone();
     let lavaclient = ctx.data().lavalink.clone();
@@ -193,7 +347,7 @@ pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
 /// clear the queue and stop all songs
 #[poise::command(prefix_command, category = "audio")]
 pub async fn clear(ctx: Context<'_>) -> Result<(), Error> {
-    let guild_id = ctx.guild_id().unwrap();
+    let Some(guild_id) = ctx.guild_id() else {ctx.say("can't do voice commands in dms").await?; return Ok(());};
     let lavaclient = ctx.data().lavalink.clone();
 
     let Some(player) = lavaclient.get_player_context(guild_id) else {
@@ -211,7 +365,7 @@ pub async fn clear(ctx: Context<'_>) -> Result<(), Error> {
 /// skip the currently playing song
 #[poise::command(prefix_command, category = "audio")]
 pub async fn skip(ctx: Context<'_>) -> Result<(), Error> {
-    let guild_id = ctx.guild_id().unwrap();
+    let Some(guild_id) = ctx.guild_id() else {ctx.say("can't do voice commands in dms").await?; return Ok(());};
     let lavaclient = ctx.data().lavalink.clone();
 
     let Some(player) = lavaclient.get_player_context(guild_id) else {
@@ -232,7 +386,7 @@ pub async fn skip(ctx: Context<'_>) -> Result<(), Error> {
 /// remove last song from the queue
 #[poise::command(prefix_command, category = "audio", aliases("rm"))]
 pub async fn remove(ctx: Context<'_>) -> Result<(), Error> {
-    let guild_id = ctx.guild_id().unwrap();
+    let Some(guild_id) = ctx.guild_id() else {ctx.say("can't do voice commands in dms").await?; return Ok(());};
     let lavaclient = ctx.data().lavalink.clone();
 
     let Some(player) = lavaclient.get_player_context(guild_id) else {
@@ -265,7 +419,7 @@ pub async fn remove(ctx: Context<'_>) -> Result<(), Error> {
 /// view the current queue
 #[poise::command(prefix_command, category = "audio", aliases("q"))]
 pub async fn queue(ctx: Context<'_>) -> Result<(), Error> {
-    let guild_id = ctx.guild_id().unwrap();
+    let Some(guild_id) = ctx.guild_id() else {ctx.say("can't do voice commands in dms").await?; return Ok(());};
     let lavaclient = ctx.data().lavalink.clone();
 
     let Some(player) = lavaclient.get_player_context(guild_id) else {
@@ -320,6 +474,11 @@ pub async fn queue(ctx: Context<'_>) -> Result<(), Error> {
                 )
                 .color(Color::RED)
                 .field(
+                    "------------------------",
+                    "",
+                    false
+                )
+                .field(
                     "in queue",
                     if response.is_empty() {
                         "nothing"
@@ -364,7 +523,7 @@ fn format_timestamp(time: u64) -> String {
 
 #[poise::command(prefix_command, category = "audio", aliases("np"))]
 pub async fn nowplaying(ctx: Context<'_>) -> Result<(), Error> {
-    let guild_id = ctx.guild_id().unwrap();
+    let Some(guild_id) = ctx.guild_id() else {ctx.say("can't do voice commands in dms").await?; return Ok(());};
     let lavaclient = ctx.data().lavalink.clone();
 
     let Some(player) = lavaclient.get_player_context(guild_id) else {
@@ -419,7 +578,7 @@ pub async fn nowplaying(ctx: Context<'_>) -> Result<(), Error> {
 /// skip to a timestamp in the song
 #[poise::command(prefix_command, category = "audio", aliases("seek", "timestamp"))]
 pub async fn skipto(ctx: Context<'_>, timestamp: Option<String>) -> Result<(), Error> {
-    let guild_id = ctx.guild_id().unwrap();
+    let Some(guild_id) = ctx.guild_id() else {ctx.say("can't do voice commands in dms").await?; return Ok(());};
     let lavaclient = ctx.data().lavalink.clone();
 
     let Some(player) = lavaclient.get_player_context(guild_id) else {
@@ -488,7 +647,7 @@ pub async fn skipto(ctx: Context<'_>, timestamp: Option<String>) -> Result<(), E
 /// rewind seconds (default 5)
 #[poise::command(prefix_command, category = "audio", aliases("rw"))]
 pub async fn rewind(ctx: Context<'_>, time: Option<String>) -> Result<(), Error> {
-    let guild_id = ctx.guild_id().unwrap();
+    let Some(guild_id) = ctx.guild_id() else {ctx.say("can't do voice commands in dms").await?; return Ok(());};
     let lavaclient = ctx.data().lavalink.clone();
 
     let Some(player) = lavaclient.get_player_context(guild_id) else {
@@ -535,7 +694,7 @@ pub async fn rewind(ctx: Context<'_>, time: Option<String>) -> Result<(), Error>
 /// fast forward seconds (default 5)
 #[poise::command(prefix_command, category = "audio", aliases("forward", "fw"))]
 pub async fn fastforward(ctx: Context<'_>, time: Option<String>) -> Result<(), Error> {
-    let guild_id = ctx.guild_id().unwrap();
+    let Some(guild_id) = ctx.guild_id() else {ctx.say("can't do voice commands in dms").await?; return Ok(());};
     let lavaclient = ctx.data().lavalink.clone();
 
     let Some(player) = lavaclient.get_player_context(guild_id) else {
@@ -578,7 +737,7 @@ pub async fn fastforward(ctx: Context<'_>, time: Option<String>) -> Result<(), E
 /// pause
 #[poise::command(prefix_command, category = "audio")]
 pub async fn pause(ctx: Context<'_>) -> Result<(), Error> {
-    let guild_id = ctx.guild_id().unwrap();
+    let Some(guild_id) = ctx.guild_id() else {ctx.say("can't do voice commands in dms").await?; return Ok(());};
     let lavaclient = ctx.data().lavalink.clone();
 
     let Some(player) = lavaclient.get_player_context(guild_id) else {
@@ -595,7 +754,7 @@ pub async fn pause(ctx: Context<'_>) -> Result<(), Error> {
 /// resume
 #[poise::command(prefix_command, category = "audio", aliases("unpause"))]
 pub async fn resume(ctx: Context<'_>) -> Result<(), Error> {
-    let guild_id = ctx.guild_id().unwrap();
+    let Some(guild_id) = ctx.guild_id() else {ctx.say("can't do voice commands in dms").await?; return Ok(());};
     let lavaclient = ctx.data().lavalink.clone();
 
     let Some(player) = lavaclient.get_player_context(guild_id) else {
@@ -612,7 +771,7 @@ pub async fn resume(ctx: Context<'_>) -> Result<(), Error> {
 /// sets playback setting to the specified setting
 #[poise::command(prefix_command, category = "audio")]
 pub async fn set(ctx: Context<'_>, setting: String, parameter: f64) -> Result<(), Error> {
-    let guild_id = ctx.guild_id().unwrap();
+    let Some(guild_id) = ctx.guild_id() else {ctx.say("can't do voice commands in dms").await?; return Ok(());};
     let lavaclient = ctx.data().lavalink.clone();
 
     let Some(player) = lavaclient.get_player_context(guild_id) else {

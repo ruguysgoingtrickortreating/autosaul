@@ -126,6 +126,7 @@ async fn main() {
                 cmds::cards_named_finger(),
                 audio::play(),
                 audio::stop(),
+                audio::search(),
                 audio::clear(),
                 audio::skip(),
                 audio::queue(),
