@@ -118,7 +118,7 @@ pub async fn play(ctx: Context<'_>, #[rest] query: String) -> Result<(), Error> 
 
     let mut tracks: Vec<TrackInQueue> = match loaded_tracks.data {
         Some(TrackLoadData::Track(x)) => vec![x.into()],
-        Some(TrackLoadData::Search(x)) => vec![x[0].clone().into()],
+        Some(TrackLoadData::Search(mut x)) => vec![x.remove(0).into()],
         Some(TrackLoadData::Playlist(x)) => {
             playlist_info = Some(x.info);
             x.tracks.into_iter().map(|x|x.into()).collect()
@@ -137,7 +137,7 @@ pub async fn play(ctx: Context<'_>, #[rest] query: String) -> Result<(), Error> 
     let track = if let Some(info) = &playlist_info {
         tracks.remove(info.selected_track.unwrap_or_default() as usize).track
     } else {
-        tracks.remove(0).track
+        tracks[0].track.clone()
     };
 
     let count = queue.get_count().await?;
