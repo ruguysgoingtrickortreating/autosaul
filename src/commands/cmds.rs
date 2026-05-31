@@ -1,6 +1,7 @@
 use poise::{CreateReply, serenity_prelude::{Color, CreateActionRow, CreateButton, CreateEmbed, CreateInteractionResponse, CreateInteractionResponseMessage, EditMessage, MessageId, UserId, futures::StreamExt}};
 use std::{collections::BTreeMap, process, time::Duration};
 use itertools::Itertools;
+use poise::serenity_prelude::{ComponentInteractionCollector, GetMessages};
 use crate::{Context, Error};
 
 /// show the help menu
@@ -105,6 +106,69 @@ pub async fn ban(ctx:poise::PrefixContext<'_, crate::Data, Error>, #[description
         },
         None => ctx.say("must provide a user to ban").await?
     };
+    Ok(())
+}
+
+#[poise::command(prefix_command)]
+pub async fn deletesince(ctx:Context<'_>, msg_id: u64, amount:u8) -> Result<(), Error> {
+    let Some(guild_id) = ctx.guild_id() else {
+        return Ok(());
+    };
+    if ctx.author().id != 640722508093325342 {
+        ctx.say("not authorized to do that").await?;
+        return Ok(());
+    }
+    if amount > 100 {
+        ctx.say("can only delete up to 100 messages").await?;
+        return Ok(())
+    }
+
+    let messages = ctx.channel_id().messages(&ctx,
+        GetMessages::new().after(MessageId::from(msg_id)).limit(amount)
+    ).await?;
+
+    let count = messages.len();
+    if messages.is_empty() {
+        ctx.say("this would not delete any messages.").await?;
+        return Ok(());
+    }
+    if count < 2 {
+        ctx.say("this would not delete enough messages (min 2).").await?;
+        return Ok(());
+    }
+
+    let msg = ctx.send(CreateReply::default()
+        .content(format!("this would delete {} messages, starting with\
+            https://discord.com/channels/{}/{}/{} and ending with\
+            https://discord.com/channels/{1}/{2}/{4}. are you sure?",
+            count,
+            guild_id, ctx.channel_id(), messages[count-1].id, messages[0].id
+        ))
+        .components(vec![CreateActionRow::Buttons(vec![
+            CreateButton::new("yes").label("yes"),
+            CreateButton::new("no").label("no")
+        ])])
+    ).await?.into_message().await?;
+
+    if let Some(interaction) = ComponentInteractionCollector::new(&ctx)
+        .message_id(msg.id)
+        .author_id(ctx.author().id)
+        .timeout(Duration::from_secs(60))
+        .await
+    {
+        msg.delete(&ctx).await?;
+        if interaction.data.custom_id == "yes" {
+            ctx.channel_id().delete_messages(&ctx,
+                messages.iter().map(|m| m.id)
+            ).await?;
+            ctx.say(format!("deleted {count} messages")).await?;
+        } else if interaction.data.custom_id == "no" {
+        }
+    } else {
+        msg.delete(&ctx).await?;
+        ctx.say("took too long to choose").await?;
+    }
+
     Ok(())
 }
 

@@ -119,6 +119,7 @@ async fn main() {
                 cmds::saul(),
                 cmds::getmessage(),
                 cmds::ban(),
+                cmds::deletesince(),
                 cmds::restart(),
                 cmds::tickle(),
                 cmds::streamtest(),

@@ -27,9 +27,18 @@ phf = "0.13.1"
 project-root = "0.2.2"
 phf_codegen = "0.13.1"
 saulimages = { git = "https://github.com/ruguysgoingtrickortreating/saulimages" }
+rapidhash = "4.4.1"
 strum = { version = "0.28.0", features = ["derive"] }
 
 [build-dependencies]
 phf = { version = "0.13.1", default-features = false }
 phf_codegen = "0.13.1"
 project-root = "0.2.2"
+
+[features]
+emoji_scrape_tool = []
+
+[[bin]]
+name = "emoji_scrape_tool"
+path = "src/bin/emoji_scrape_tool.rs"
+required-features = ["emoji_scrape_tool"]
