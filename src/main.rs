@@ -143,6 +143,7 @@ async fn main() {
                 gambling::give(),
                 gambling::horseracing(),
                 gambling::wager(),
+                gambling::blackjack(),
                 gambling::coalmines(),
                 gambling::chinesesweatshop(),
                 games::imposter(),
@@ -179,12 +180,37 @@ async fn main() {
                             //     println!("          - {}",attachment.content_type.as_ref().unwrap());
                             // }
 
-                            if new_message.content == "😉" {
-                                let rand_range = rand::random_range(0..data.rand_words.len());
-                                new_message
-                                    .channel_id
-                                    .say(&ctx.http, &*data.rand_words[rand_range])
-                                    .await?;
+                            match new_message.content.as_str() {
+                                "😉" => {
+                                    let rand_range = rand::random_range(0..data.rand_words.len());
+                                    new_message
+                                        .channel_id
+                                        .say(&ctx.http, &*data.rand_words[rand_range])
+                                        .await?;
+                                }
+                                "hit" => {
+                                    println!("hitting");
+                                    let mut games = data.active_games.lock().await;
+                                    println!("awaited");
+                                    if let Some(guild_id) = new_message.guild_id
+                                    { dbg!(guild_id); if let Some(gg) = games.get_mut(&guild_id)
+                                    { println!("has games");if let Some(snd) = gg.blackjack.active_games.get(&new_message.author.id.get()) {
+                                        println!("getting sendy");
+                                        snd.send(true).await;
+                                    }}}
+                                }
+                                "stay" | "stand" => {
+                                    println!("standing");
+                                    let mut games = data.active_games.lock().await;
+                                    println!("awaited");
+                                    if let Some(guild_id) = new_message.guild_id &&
+                                    let Some(gg) = games.get_mut(&guild_id) && 
+                                    let Some(snd) = gg.blackjack.active_games.get(&new_message.author.id.get()) {
+                                        println!("getting sendy");
+                                        snd.send(false).await;
+                                    }
+                                }
+                                _ => ()
                             }
                         }
                         serenity::FullEvent::VoiceStateUpdate { old, new } => {

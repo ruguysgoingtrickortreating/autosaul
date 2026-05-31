@@ -12,6 +12,7 @@ use tokio::time::sleep;
 pub struct Games {
     pub horse_racing: Option<crate::gambling::HorseRacingData>,
     pub imposter: Option<ImposterGameData>,
+    pub blackjack: crate::gambling::BlackjackData,
 }
 
 pub struct ImposterGameData {

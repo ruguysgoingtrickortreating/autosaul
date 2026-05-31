@@ -27,6 +27,7 @@ phf = "0.13.1"
 project-root = "0.2.2"
 phf_codegen = "0.13.1"
 saulimages = { git = "https://github.com/ruguysgoingtrickortreating/saulimages" }
+strum = { version = "0.28.0", features = ["derive"] }
 
 [build-dependencies]
 phf = { version = "0.13.1", default-features = false }

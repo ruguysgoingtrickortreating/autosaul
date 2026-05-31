@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use colored::Colorize;
 
 use poise::{CreateReply, serenity_prelude::{self as serenity, Color, CreateActionRow, CreateButton, CreateEmbed, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, EditMessage, FutureExt, Mentionable, User, futures::StreamExt}};
-use tokio::{sync::{Mutex, mpsc}, time::{Instant, sleep}};
+use tokio::{sync::{Mutex, mpsc}, time::{Instant, sleep, timeout}};
 use crate::{Context,Error};
 
 
@@ -530,7 +530,232 @@ async fn _horseracing(ctx:&Context<'_>) -> Result<(), Error> {
     gg.horse_racing = None;
 
     Ok(())
-    
+
+}
+
+#[derive(strum::Display, Copy, Clone, Debug, PartialEq, Eq)]
+enum Suit {
+    Spades,
+    Clubs,
+    Diamonds,
+    Hearts
+}
+
+#[derive(Default, Debug)]
+struct Deck {
+    in_play: Vec<Card>
+}
+impl Deck {
+    fn draw(&mut self) -> Card {
+        let card = Card {
+            number: rand::random_range(1..=13),
+            suit: match rand::random_range(0..4) {
+                0 => Suit::Spades,
+                1 => Suit::Clubs,
+                2 => Suit::Diamonds,
+                3 => Suit::Hearts,
+                _ => unreachable!()
+            }
+
+        };
+        if !self.in_play.contains(&card) {
+            self.in_play.push(card);
+        }
+        return card;
+    }
+}
+
+#[derive(PartialEq, Eq, Copy, Clone, Debug)]
+struct Card {
+    number: u8,
+    suit: Suit
+}
+impl Card {
+    fn num_text(&self) -> &'static str {
+        match self.number {
+            1 => "Ace", 2 => "2", 3 => "3", 4 => "4", 5 => "5",
+            6 => "6", 7 => "7", 8 => "8", 9 => "9", 10 => "10",
+            11 => "Jack",
+            12 => "Queen",
+            13 => "King",
+            _ => unreachable!()
+        }
+    }
+    fn determine_value(&self, ace_as_11: bool) -> u8 {
+        match self.number {
+            1 => if ace_as_11 {11} else {1},
+            2..10 => self.number,
+            10..=13 => 10,
+            _ => unreachable!()
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct BlackjackData {
+    pub active_games: HashMap<u64, mpsc::Sender<bool>>
+}
+
+#[poise::command(prefix_command,category = "gambling")]
+pub async fn blackjack(ctx:Context<'_>, wager:u32) -> Result<(), Error> {
+    fn ace_aware_sum(hand: &Vec<Card>) -> u8 {
+        let mut sum = {
+            let mut sum = 0;
+            for i in hand {
+                sum += i.determine_value(true);
+            }
+            sum
+        };
+        if sum > 21 {
+            let mut sum2 = 0;
+            for i in hand {
+                sum2 += i.determine_value(false);
+            }
+            sum = sum2
+        };
+        return sum;
+    }
+
+    let id = ctx.msg.author.id.get();
+    let guild_id = ctx.guild_id().unwrap();
+    let mut games = ctx.data().active_games.lock().await;
+    if let Some(gg) = games.get_mut(&guild_id) {
+        if gg.blackjack.active_games.contains_key(&id) {
+            ctx.say("you already have an active blackjack game").await?;
+            return Ok(());
+        } //else {
+        //     gg.blackjack.insert(id, None);
+        // }
+    } else {
+        games.insert(guild_id, Default::default());
+        // games.blackjack.insert(id, None);
+    }
+    drop(games);
+
+    let dbid = i64::from(ctx.author().id);
+    let db = _set_db_account(&ctx, dbid).await?;
+    let amount: i64 = db.query_row("select id, agarthereum from saul where discord_id = ?1",
+            [dbid],
+            |row| Ok(row.get(1)?))?;
+
+    ctx.say("blackjack: win 2x your money or lose it all\ndealer will stand on soft 17s").await?;
+    let mut deck = Deck::default();
+    let mut dealer_cards = vec![
+        deck.draw(),
+        deck.draw(),
+    ];
+    let mut your_cards = vec![
+        deck.draw(),
+        deck.draw(),
+    ];
+
+    ctx.say(format!("\
+dealer's cards: {}, [?]
+your cards: {}, {}
+hit or stand?
+",dealer_cards[0].num_text(),
+your_cards[0].num_text(),your_cards[1].num_text())).await?;
+
+    let mut gamedata = ctx.data().active_games.lock().await;
+    let mut blackjackdata = &mut gamedata.get_mut(&guild_id).unwrap().blackjack;
+    let (send, mut rec) = mpsc::channel(100);
+    blackjackdata.active_games.insert(id, send);
+    drop(gamedata);
+
+    enum HandState {
+        Bust,
+        Perfect21,
+        Continue
+    }
+ 
+    loop {
+        match timeout(Duration::from_secs(30), rec.recv()).await {
+            Ok(Some(chose_hit)) => {
+                if chose_hit {
+                    your_cards.push(deck.draw());
+                    match ace_aware_sum(&your_cards) {
+                        22.. => {
+                            ctx.say(format!("your cards: {} **\\*BUST\\***\nbetter luck next time", your_cards.iter().map(|x| x.num_text()).join(", "))).await?;
+                            let mut gamedata = ctx.data().active_games.lock().await;
+                            let mut blackjackdata = &mut gamedata.get_mut(&guild_id).unwrap().blackjack;
+                            blackjackdata.active_games.remove_entry(&id);
+                            return Ok(())
+                        }
+                        21 => break,
+                        ..21 => {
+                            ctx.say(format!("your cards: {}\nhit or stand?", your_cards.iter().map(|x| x.num_text()).join(", "))).await?;
+                        }
+                    }
+                } else {
+                    break
+                }
+            }
+            Ok(None) => println!("blackjack channel closed ??"),
+            Err(_) => {ctx.say("took too long to decide").await?; break},
+        }
+    }
+    let your_cards_string = your_cards.iter().map(|x| x.num_text()).join(", ");
+    let mut msg = ctx.say(format!("\
+dealer's cards: {}
+your cards: {your_cards_string}", dealer_cards.iter().map(|x| x.num_text()).join(", ")
+    )).await?.into_message().await?;
+
+    let mut busted = false;
+    loop {
+        let dealer_cards_string = dealer_cards.iter().map(|x| x.num_text()).join(", ");
+        msg.edit(&ctx, EditMessage::new().content(format!("\
+dealer's cards: {dealer_cards_string}
+your cards: {your_cards_string}"))).await?;
+        let sum_soft = {
+            let mut sum = 0;
+            for i in &mut dealer_cards {
+                sum += i.determine_value(true);
+            }
+            sum
+        };
+        let sum_hard = |hand: &mut Vec<Card>| {
+            let mut sum = 0;
+            for i in hand {
+                sum += i.determine_value(false);
+            }
+            sum
+        };
+        if sum_soft <= 17 || sum_hard(&mut dealer_cards) <= 17 {
+            sleep(Duration::from_secs(2)).await;
+            msg.edit(&ctx, EditMessage::new().content(format!("\
+    dealer's cards: {dealer_cards_string} [*hit!*]
+your cards: {your_cards_string}"))).await?;
+            sleep(Duration::from_secs(2)).await;
+            dealer_cards.push(deck.draw());
+        } else {
+            if ace_aware_sum(&dealer_cards) > 21 {
+                msg.edit(&ctx, EditMessage::new().content(format!("\
+        dealer's cards: {dealer_cards_string} **\\*BUST\\***
+your cards: {your_cards_string}"))).await?;
+                busted = true;
+            }  
+            break
+        }
+    }
+
+    if busted {
+        ctx.say(format!("dealer busted! you win 🪙{}", wager*2)).await?;
+    } else {
+        let (dealer_sum, your_sum) = (ace_aware_sum(&dealer_cards), ace_aware_sum(&your_cards));
+        if dealer_sum > your_sum {
+            ctx.say("dealer won! you get nothing").await?;
+        } else if dealer_sum == your_sum {
+            ctx.say("tie! you get your money back.").await?;
+        } else if dealer_sum < your_sum {
+            ctx.say(format!("you win! you get 🪙{}", wager*2)).await?;
+        }
+    }
+
+    let mut gamedata = ctx.data().active_games.lock().await;
+    let mut blackjackdata = &mut gamedata.get_mut(&guild_id).unwrap().blackjack;
+    blackjackdata.active_games.remove_entry(&id);
+
+    Ok(())
 }
 
 #[poise::command(prefix_command,category = "gambling")]
