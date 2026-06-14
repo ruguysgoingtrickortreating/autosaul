@@ -65,20 +65,9 @@ pub async fn give(ctx:Context<'_>, user:serenity::User, amount:i64) -> Result<()
         return Ok(())
     }
 
-    let db = match Connection::open("saul.db") {
-        Ok(db) => db,
-        Err(err) => {
-            ctx.say(format!("error opening database: {}",err)).await?;
-            return Ok(());
-        }
-    };
-    if let Err(err) = db.execute(
-        "INSERT INTO saul (discord_id, agarthereum)
-        VALUES (?1, ?2)
-        ON CONFLICT(discord_id) DO UPDATE SET agarthereum = agarthereum + excluded.agarthereum",
-        [i64::from(user.id),amount]
-    ) {     ctx.say(format!("error writing to database: {}",err)).await?;
-            return Ok(());};
+    let id = user.id.get() as i64;
+    let db = _set_db_account(&ctx,id).await?;
+    db.execute("UPDATE saul SET agarthereum = agarthereum + ?2 WHERE discord_id = ?1",[id,amount])?;
 
     let balance: i64 = db.query_row("select id, agarthereum from saul where discord_id = ?1",
                 [i64::from(ctx.author().id)],
@@ -597,11 +586,21 @@ pub struct BlackjackData {
 }
 
 #[poise::command(prefix_command,category = "gambling")]
-pub async fn blackjack(ctx:Context<'_>, wager:Option<u32>) -> Result<(), Error> {
+pub async fn blackjack(ctx:Context<'_>, wager:Option<i64>) -> Result<(), Error> {
     let Some(wager) = wager else {
         ctx.say("provide an amount of money to gamble").await?;
         return Ok(());
     };
+    let dbid = i64::from(ctx.author().id);
+    let db = _set_db_account(&ctx, dbid).await?;
+    let amount: i64 = db.query_row("select id, agarthereum from saul where discord_id = ?1",
+           [dbid],
+           |row| Ok(row.get(1)?))?;
+    if amount < wager {
+        ctx.say("not enough agarthereum").await?;
+        return Ok(());
+    }
+
     fn ace_aware_sum(hand: &Vec<Card>) -> u8 {
         let mut sum = {
             let mut sum = 0;
@@ -677,6 +676,10 @@ your_cards[0].num_text(),your_cards[1].num_text())).await?;
                             let mut gamedata = ctx.data().active_games.lock().await;
                             let mut blackjackdata = &mut gamedata.get_mut(&guild_id).unwrap().blackjack;
                             blackjackdata.active_games.remove_entry(&id);
+
+                            let dbid = i64::from(ctx.author().id);
+                            let db = _set_db_account(&ctx, dbid).await?;
+                            db.execute("UPDATE saul SET agarthereum = agarthereum - ?2 WHERE discord_id = ?1",(id as i64,wager))?;
                             return Ok(())
                         }
                         21 => break,
