@@ -597,7 +597,11 @@ pub struct BlackjackData {
 }
 
 #[poise::command(prefix_command,category = "gambling")]
-pub async fn blackjack(ctx:Context<'_>, wager:u32) -> Result<(), Error> {
+pub async fn blackjack(ctx:Context<'_>, wager:Option<u32>) -> Result<(), Error> {
+    let Some(wager) = wager else {
+        ctx.say("provide an amount of money to gamble").await?;
+        return Ok(());
+    };
     fn ace_aware_sum(hand: &Vec<Card>) -> u8 {
         let mut sum = {
             let mut sum = 0;
@@ -631,12 +635,6 @@ pub async fn blackjack(ctx:Context<'_>, wager:u32) -> Result<(), Error> {
         // games.blackjack.insert(id, None);
     }
     drop(games);
-
-    let dbid = i64::from(ctx.author().id);
-    let db = _set_db_account(&ctx, dbid).await?;
-    let amount: i64 = db.query_row("select id, agarthereum from saul where discord_id = ?1",
-            [dbid],
-            |row| Ok(row.get(1)?))?;
 
     ctx.say("blackjack: win 2x your money or lose it all\ndealer will stand on soft 17s").await?;
     let mut deck = Deck::default();
@@ -737,17 +735,23 @@ your cards: {your_cards_string}"))).await?;
             break
         }
     }
+    
+    let dbid = i64::from(ctx.author().id);
+    let db = _set_db_account(&ctx, dbid).await?;
 
     if busted {
         ctx.say(format!("dealer busted! you win 🪙{}", wager*2)).await?;
+        db.execute("UPDATE saul SET agarthereum = agarthereum + ?2 WHERE discord_id = ?1",(id as i64,wager))?;
     } else {
         let (dealer_sum, your_sum) = (ace_aware_sum(&dealer_cards), ace_aware_sum(&your_cards));
         if dealer_sum > your_sum {
             ctx.say("dealer won! you get nothing").await?;
+            db.execute("UPDATE saul SET agarthereum = agarthereum - ?2 WHERE discord_id = ?1",(id as i64,wager))?;
         } else if dealer_sum == your_sum {
             ctx.say("tie! you get your money back.").await?;
         } else if dealer_sum < your_sum {
             ctx.say(format!("you win! you get 🪙{}", wager*2)).await?;
+            db.execute("UPDATE saul SET agarthereum = agarthereum + ?2 WHERE discord_id = ?1",(id as i64,wager))?;
         }
     }
 
@@ -797,7 +801,7 @@ pub async fn chinesesweatshop(ctx:Context<'_>) -> Result<(), Error> {
     ctx.say("https://cdn.discordapp.com/attachments/1000574112546168843/1444257508670570620/image0.jpg?ex=692c0d1f&is=692abb9f&hm=b64bb65a7b9edb9b52a6b707bfc93a8136d6d7cad3a44d139ee1eb35265424be&").await?;
     sleep(Duration::from_secs(3)).await;
     let pay = rand::random_range(30..120);
-    match rand::random_range(0..2) {
+    match rand::random_range(0..3) {
         0 => {ctx.say(format!("{} produced prime paraphernalia for the polyester prince 🪙{}",ctx.author().mention(),pay)).await?;
             ctx.say("https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQlphM7gLkOEYmFO6XFfX7FJTbUqO_CLkrZQqPAc6brOR8ZScgF").await?;},
         1 => {ctx.say(format!("{} made the whole set for granny the temu warrior 🪙{} ⚒️",ctx.author().mention(),pay)).await?;
